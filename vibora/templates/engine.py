@@ -1,3 +1,4 @@
+import contextlib
 from typing import Dict
 from .ast import merge, raise_nodes, resolve_include_nodes
 from .exceptions import TemplateNotFound, ConflictingNames
@@ -61,16 +62,122 @@ class TemplateEngine:
         :param names:
         :return:
         """
-        template = self.template_parser.parse(template)
-        missing_names = 0
-        for name in names:
-            if name not in self.templates:
-                self.templates[name] = template
-            else:
-                missing_names += 1
-                if missing_names == len(names):
-                    raise ConflictingNames('This template needs a unique name because imports are name based.')
-        return template
+        return self.add_templates([(template, names)])[0]
+
+    def add_templates(self, items: list) -> list:
+        """
+        Registers multiple templates atomically.
+
+        Every item is a tuple of (Template, names). Parsing and conflict
+        validation run before any state mutation, so a conflicting name or a
+        parse error leaves the engine untouched (all-or-nothing semantics).
+
+        :param items:
+        :return:
+        """
+        parsed_items = []
+        for template, names in items:
+            parsed_items.append((self.template_parser.parse(template), list(names)))
+
+        for parsed_template, names in parsed_items:
+            for name in names:
+                if name in self.templates:
+                    raise ConflictingNames(
+                        'This template needs a unique name because imports are name based.'
+                    )
+
+        for parsed_template, names in parsed_items:
+            for name in names:
+                self.templates[name] = parsed_template
+        return [parsed_template for parsed_template, names in parsed_items]
+
+    def _snapshot(self) -> dict:
+        """
+        Captures the engine mutable state so it can be restored on failure.
+
+        :return:
+        """
+        return {
+            'templates': dict(self.templates),
+            'compiled_templates': dict(self.compiled_templates),
+            'cache_templates': dict(self.cache.loaded_templates),
+            'cache_metas': dict(self.cache.loaded_metas)
+        }
+
+    def _restore(self, snapshot: dict):
+        """
+        Restores a snapshot previously taken with :meth:`_snapshot`.
+
+        :param snapshot:
+        :return:
+        """
+        self.templates = dict(snapshot['templates'])
+        self.compiled_templates = dict(snapshot['compiled_templates'])
+        self.cache.loaded_templates = dict(snapshot['cache_templates'])
+        self.cache.loaded_metas = dict(snapshot['cache_metas'])
+
+    @contextlib.contextmanager
+    def transaction(self):
+        """
+        Context manager providing transactional template loading.
+
+        Any exception raised inside the block rolls the engine back to the
+        state captured when the block started.
+        """
+        snapshot = self._snapshot()
+        try:
+            yield self
+        except Exception:
+            self._restore(snapshot)
+            raise
+
+    def get_dependents(self, template_hash: str) -> set:
+        """
+        Returns the hashes of every registered template that depends
+        (directly or transitively) on the given one.
+
+        :param template_hash:
+        :return:
+        """
+        dependents = set()
+        pending = [template_hash]
+        while pending:
+            current_hash = pending.pop()
+            for template in self.templates.values():
+                if current_hash in template.dependencies and template.hash not in dependents:
+                    dependents.add(template.hash)
+                    pending.append(template.hash)
+        return dependents
+
+    def compile_template(self, template: ParsedTemplate, verbose: bool=False, invalidate: bool=True):
+        """
+        Compiles and caches a single template.
+
+        Previously compiled versions of the template itself and every template
+        depending on it are invalidated so a hot reload never serves a stale
+        dependency chain.
+
+        :param template:
+        :param verbose:
+        :return:
+        """
+        if template.hash in self.compiled_templates and self.cache.get(template.hash) is not None:
+            return self.compiled_templates[template.hash]
+
+        hashes_to_invalidate = {template.hash}
+        if invalidate:
+            hashes_to_invalidate |= self.get_dependents(template.hash)
+        for template_hash in hashes_to_invalidate:
+            self.compiled_templates.pop(template_hash, None)
+            self.cache.remove(template_hash)
+
+        if not template.prepared:
+            self.prepare_template(template)
+
+        compiled_template = self.compiler.compile(template, verbose=verbose)
+        self.cache.store(compiled_template)
+        self.compiled_templates[template.hash] = compiled_template
+        return compiled_template
 
     async def render(self, name: str, streaming: bool=False, **template_vars):
         """

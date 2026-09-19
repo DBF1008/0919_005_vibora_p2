@@ -10,6 +10,7 @@ class TemplateRenderError(TemplateError):
         self.template = template
         self.original_exception = exception
         self.template_line = template_line
+        self.template_name = template_name
         super().__init__(json.dumps({'template_line': template_line, 'error': str(exception),
                                      'template_name': template_name}))
 

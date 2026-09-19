@@ -10,15 +10,19 @@ from .nodes import EvalNode, ForNode, ExtendsNode, BlockNode, IfNode, ElifNode, 
 
 class Template:
 
-    def __init__(self, content: str):
+    def __init__(self, content: str, origin: str='<string>'):
         self.content = content
+        # Original source location (usually the template file path). Used to
+        # build source maps so runtime errors can point back at the template.
+        self.origin = origin
         self.hash = hashlib.md5(content.encode()).hexdigest()
 
 
 class ParsedTemplate(Template):
 
-    def __init__(self, content: str, ast: Node, dependencies: set = None, prepared: bool = False):
-        super().__init__(content=content)
+    def __init__(self, content: str, ast: Node, dependencies: set = None, prepared: bool = False,
+                 origin: str='<string>'):
+        super().__init__(content=content, origin=origin)
         self.ast = ast
         self.dependencies = dependencies or set()
         self.prepared = prepared
@@ -122,7 +126,9 @@ class TemplateParser:
         :param template:
         :return:
         """
-        parsed_template = ParsedTemplate(content=template.content, ast=Node())
+        parsed_template = ParsedTemplate(
+            content=template.content, ast=Node(), origin=getattr(template, 'origin', '<string>')
+        )
         current_nodes, stop_tokens = [parsed_template.ast], []
         content = template.content
         while content:
