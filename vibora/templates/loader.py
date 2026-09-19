@@ -19,6 +19,9 @@ class TemplateLoader(threading.Thread):
         self.has_to_run = True
 
     def reload_templates(self, paths: list):
+        # Tracking exactly which template names were affected so we can
+        # incrementally recompile them instead of the entire template set.
+        affected_names = []
         for root, path in paths:
             if path in self.path_index:
                 template = self.path_index[path]
@@ -34,14 +37,14 @@ class TemplateLoader(threading.Thread):
                     if template_hash in self.hash_index:
                         values = self.hash_index[template_hash]
                         self.engine.remove_template(values[2])
-                        self.add_to_engine(values[0], values[1])
+                        affected_names.extend(self.add_to_engine(values[0], values[1]))
 
                 # Removing the actual template.
                 self.engine.remove_template(template)
 
-            self.add_to_engine(root, path)
+            affected_names.extend(self.add_to_engine(root, path))
         self.engine.sync_cache()
-        self.engine.compile_templates()
+        self.engine.compile_templates(names=affected_names)
 
     def check_for_modified_templates(self):
         to_be_notified = []
@@ -64,11 +67,12 @@ class TemplateLoader(threading.Thread):
 
     def add_to_engine(self, root: str, path: str):
         with open(path, 'r') as f:
-            template = Template(f.read())
+            template = Template(f.read(), name=path)
             names = get_import_names(root, path)
             template = self.engine.add_template(template, names=names)
             self.path_index[path] = template
             self.hash_index[template.hash] = (root, path, template)
+            return names
 
     def load(self):
         for directory in self.directories:
@@ -77,6 +81,9 @@ class TemplateLoader(threading.Thread):
                     if file.endswith(self.supported_files):
                         path = os.path.join(root, file)
                         self.add_to_engine(root, path)
+                        # Recording the modification time so the first polling
+                        # cycle doesn't mistake these templates for changes.
+                        self.cache[path] = os.path.getmtime(path)
 
     def run(self):
         while self.has_to_run:

@@ -1,4 +1,4 @@
-from typing import Dict
+from typing import Dict, List, Tuple
 from .ast import merge, raise_nodes, resolve_include_nodes
 from .exceptions import TemplateNotFound, ConflictingNames
 from .nodes import ExtendsNode, MacroNode
@@ -61,16 +61,39 @@ class TemplateEngine:
         :param names:
         :return:
         """
-        template = self.template_parser.parse(template)
-        missing_names = 0
+        # Transactional behavior: we validate every single name before
+        # touching any state so a conflict never leaves partial side effects.
+        conflicting_names = [name for name in names if name in self.templates]
+        if conflicting_names:
+            raise ConflictingNames(
+                f'This template needs a unique name because imports are name based. '
+                f'Conflicting names: {conflicting_names}'
+            )
+        parsed_template = self.template_parser.parse(template)
+        if getattr(parsed_template, 'name', None) is None and names:
+            parsed_template.name = names[0]
         for name in names:
-            if name not in self.templates:
-                self.templates[name] = template
-            else:
-                missing_names += 1
-                if missing_names == len(names):
-                    raise ConflictingNames('This template needs a unique name because imports are name based.')
-        return template
+            self.templates[name] = parsed_template
+        return parsed_template
+
+    def add_templates(self, templates: List[Tuple[Template, list]]) -> List[ParsedTemplate]:
+        """Transactionally adds a batch of templates: either every template
+        is registered or the engine is rolled back to its previous state.
+
+        :param templates: A list of (Template, names) tuples.
+        :return: The list of parsed templates, in the same order as received.
+        """
+        snapshot = dict(self.templates)
+        parsed_templates = []
+        try:
+            for template, names in templates:
+                parsed_templates.append(self.add_template(template, names))
+        except Exception:
+            # Rolling back every side effect produced by this batch.
+            self.templates.clear()
+            self.templates.update(snapshot)
+            raise
+        return parsed_templates
 
     async def render(self, name: str, streaming: bool=False, **template_vars):
         """
@@ -164,14 +187,29 @@ class TemplateEngine:
             if any([x for x in meta.dependencies if x not in updated_hashes]):
                 self.cache.remove(template_hash)
 
-    def compile_templates(self, verbose=False):
+    def compile_templates(self, verbose=False, names: list=None):
         """
 
         :param verbose:
+        :param names: Optionally restrict compilation to the templates
+                      registered under these names. Used by the template
+                      loader to incrementally recompile only what changed
+                      instead of scanning every known template.
         :return:
         """
+        if names is not None:
+            targets = []
+            seen_hashes = set()
+            for name in names:
+                template = self.templates.get(name)
+                if template is not None and template.hash not in seen_hashes:
+                    seen_hashes.add(template.hash)
+                    targets.append(template)
+        else:
+            targets = list(self.templates.values())
+
         # Checking if all dependencies are met
-        for template in self.templates.values():
+        for template in targets:
 
             # Trying to load the compiled version from cache,
             # if not possible then let's call the compiler to build this template.

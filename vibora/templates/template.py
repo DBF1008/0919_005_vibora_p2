@@ -10,15 +10,17 @@ from .nodes import EvalNode, ForNode, ExtendsNode, BlockNode, IfNode, ElifNode, 
 
 class Template:
 
-    def __init__(self, content: str):
+    def __init__(self, content: str, name: str=None):
         self.content = content
         self.hash = hashlib.md5(content.encode()).hexdigest()
+        self.name = name
 
 
 class ParsedTemplate(Template):
 
-    def __init__(self, content: str, ast: Node, dependencies: set = None, prepared: bool = False):
-        super().__init__(content=content)
+    def __init__(self, content: str, ast: Node, dependencies: set = None, prepared: bool = False,
+                 name: str=None):
+        super().__init__(content=content, name=name)
         self.ast = ast
         self.dependencies = dependencies or set()
         self.prepared = prepared
@@ -33,8 +35,8 @@ class ParsedTemplate(Template):
 
 class CompiledTemplate(ParsedTemplate):
     def __init__(self, content: str, ast: Node, dependencies: set, code: str,
-                 meta: TemplateMeta, render: Callable):
-        super().__init__(content=content, ast=ast, dependencies=dependencies)
+                 meta: TemplateMeta, render: Callable, name: str=None):
+        super().__init__(content=content, ast=ast, dependencies=dependencies, name=name)
         self.code = code
         self.meta = meta
         self.render = render
@@ -122,7 +124,8 @@ class TemplateParser:
         :param template:
         :return:
         """
-        parsed_template = ParsedTemplate(content=template.content, ast=Node())
+        parsed_template = ParsedTemplate(content=template.content, ast=Node(),
+                                         name=getattr(template, 'name', None))
         current_nodes, stop_tokens = [parsed_template.ast], []
         content = template.content
         while content:

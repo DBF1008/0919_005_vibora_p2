@@ -4,7 +4,6 @@ import os
 import tempfile
 import time
 import datetime
-from setuptools import Extension, setup
 from ..compilers.base import TemplateCompiler
 from ..utils import find_template_binary, CompilerFlavor, TemplateMeta, get_architecture_signature, CompilationResult
 
@@ -28,6 +27,11 @@ class CythonTemplateCompiler(TemplateCompiler):
         self.functions = []
         self.flavor = flavor
         self.temporary_dir = temporary_dir or tempfile.gettempdir()
+        # Source mapping state: allows runtime exceptions raised by the
+        # compiled binary to be traced back to the original template file/line.
+        self.pending_comment = None
+        self.template_line = 1
+        self.source_map = {}
 
     def clean(self):
         self._indentation = 0
@@ -36,8 +40,14 @@ class CythonTemplateCompiler(TemplateCompiler):
         self.accumulated_text = ''
         self.functions = []
         self.flavor = CompilerFlavor.TEMPLATE
+        self.pending_comment = None
+        self.template_line = 1
+        self.source_map = {}
 
     def add_text(self, content: str):
+        # Tracking the original template line so comments/statements
+        # can be mapped back to their source position.
+        self.template_line += content.count('\n')
         content = content.replace("\n", "\\n")
         content = content.replace(r'"', r'\"')
         self.accumulated_text += content
@@ -46,13 +56,35 @@ class CythonTemplateCompiler(TemplateCompiler):
         text = self.accumulated_text
         self.accumulated_text = ''
         stm = f'{self.content_var}.append("{text}")'
-        self.add_statement(stm)
+        self.add_statement(stm, flush_comments=False)
 
-    def add_statement(self, content: str):
+    def add_comment(self, content: str):
+        self.pending_comment = content.strip()
+
+    def add_statement(self, content: str, flush_comments: bool=True):
         if self.accumulated_text:
             self.flush_text()
+        if self.pending_comment and flush_comments:
+            raw = ' '.join(self.pending_comment.split())
+            self.pending_comment = None
+            # The original template statement is embedded as a comment so the
+            # generated .pyx file is self-describing when inspected manually.
+            self.content += (' ' * self._indentation) + '# ' + raw + '\n'
+            # The next generated line maps back to the original template line.
+            self.source_map[self.content.count('\n') + 1] = (self.template_line, raw)
         new_content = (' ' * self._indentation) + content.strip() + '\n'
         self.content += new_content
+
+    def get_source_map(self) -> dict:
+        """Returns the source map adjusted to the final .pyx file layout
+        (helper functions are prepended to the generated content).
+
+        :return: {generated_line: (template_line, raw_source)}
+        """
+        offset = 0
+        for helper_function in self.functions:
+            offset += helper_function.count('\n') + 2
+        return {line + offset: value for line, value in self.source_map.items()}
 
     def consume(self, template):
         self.add_statement(f'cpdef str render(dict {self.context_var}):')
@@ -86,6 +118,10 @@ class CythonTemplateCompiler(TemplateCompiler):
         :param template:
         :return:
         """
+        # Imported lazily so the compiler module remains importable
+        # (and its source mapping introspectable) without a build toolchain.
+        from setuptools import Extension, setup
+
         # Tracking compile times
         started_at = time.time()
 
@@ -128,7 +164,9 @@ class CythonTemplateCompiler(TemplateCompiler):
             created_at=datetime.datetime.now().isoformat(),
             architecture=get_architecture_signature(),
             compilation_time=round(time.time() - started_at, 2),
-            dependencies=template.dependencies
+            dependencies=template.dependencies,
+            source_map=self.get_source_map(),
+            template_name=getattr(template, 'name', None)
         )
 
         # Compilation result contains the meta data and the render function loaded at runtime.

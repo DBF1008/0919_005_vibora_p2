@@ -6,12 +6,17 @@ class TemplateError(Exception):
 
 
 class TemplateRenderError(TemplateError):
-    def __init__(self, template, template_line, exception, template_name):
+    def __init__(self, template, template_line, exception, template_name,
+                 template_file=None, template_line_number=None):
         self.template = template
         self.original_exception = exception
         self.template_line = template_line
+        self.template_file = template_file
+        self.template_line_number = template_line_number
         super().__init__(json.dumps({'template_line': template_line, 'error': str(exception),
-                                     'template_name': template_name}))
+                                     'template_name': template_name,
+                                     'template_file': template_file,
+                                     'template_line_number': template_line_number}))
 
 
 class DuplicatedTemplateName(TemplateError):
